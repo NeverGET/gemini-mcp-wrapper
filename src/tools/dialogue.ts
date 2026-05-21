@@ -7,7 +7,13 @@
 
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { executeGemini, buildPrompt, parseGeminiJson } from '../gemini-cli.js';
-import type { DialogueInput } from '../types.js';
+import {
+  assertString,
+  assertOptionalString,
+  assertStringArray,
+  assertOptionalEnum,
+  assertOptionalNumber,
+} from '../validation.js';
 
 export const dialogueTool: Tool = {
   name: 'gemini_dialogue',
@@ -40,6 +46,15 @@ Claude synthesizes Gemini's responses with its own perspective.`,
         description:
           'Specific perspective to adopt (e.g., "security expert", "performance engineer")',
       },
+      model: {
+        type: 'string',
+        enum: ['flash', 'pro', 'auto'],
+        description: "Gemini model tier. 'auto' (default for dialogue) routes to pro.",
+      },
+      timeout_ms: {
+        type: 'number',
+        description: 'Override the per-call timeout in milliseconds.',
+      },
     },
     required: ['topic', 'context', 'questions'],
   },
@@ -65,20 +80,28 @@ interface DialogueOutput {
 export async function handleDialogue(
   args: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const input = args as unknown as DialogueInput;
+  // Input validation — added 2026-05-21 per IMPROVEMENT_NOTES item B.
+  // Replaces `args as unknown as DialogueInput` cast that crashed on
+  // missing `questions` (line 70 of the pre-fix file).
+  const topic = assertString(args, 'topic');
+  const context = assertString(args, 'context');
+  const questions = assertStringArray(args, 'questions', { minLen: 1 });
+  const perspective = assertOptionalString(args, 'perspective');
+  const model = assertOptionalEnum(args, 'model', ['flash', 'pro', 'auto'] as const);
+  const timeoutMs = assertOptionalNumber(args, 'timeout_ms', { min: 1000 });
 
-  const questionsFormatted = input.questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
+  const questionsFormatted = questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
 
   const prompt = buildPrompt(
     `You are participating in a brainstorming dialogue about:
 
 ## Topic
-${input.topic}
+${topic}
 
 ## Context
-${input.context}
+${context}
 
-${input.perspective ? `## Your Perspective\nAdopt the perspective of: ${input.perspective}` : ''}
+${perspective ? `## Your Perspective\nAdopt the perspective of: ${perspective}` : ''}
 
 ## Questions to Address
 ${questionsFormatted}
@@ -109,7 +132,8 @@ Be specific and actionable in your recommendations.`,
   const result = await executeGemini(prompt, {
     tool: 'gemini_dialogue',
     input: args,
-    timeout_ms: input.timeout_ms || 120000,
+    timeout_ms: timeoutMs ?? 120000,
+    model,
   });
 
   if (!result.success) {

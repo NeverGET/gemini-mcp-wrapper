@@ -7,8 +7,13 @@
 
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { executeGemini, buildPrompt, parseGeminiJson } from '../gemini-cli.js';
-import { validateResearchOutput } from '../validation.js';
-import type { ResearchInput } from '../types.js';
+import {
+  validateResearchOutput,
+  assertString,
+  assertOptionalEnum,
+  assertOptionalStringArray,
+  assertOptionalNumber,
+} from '../validation.js';
 
 export const researchTool: Tool = {
   name: 'gemini_research',
@@ -44,6 +49,15 @@ Returns structured findings with sources for Claude to validate.`,
         description: 'Maximum number of findings to return',
         default: 10,
       },
+      model: {
+        type: 'string',
+        enum: ['flash', 'pro', 'auto'],
+        description: "Gemini model tier. 'auto' (default for research) routes to flash.",
+      },
+      timeout_ms: {
+        type: 'number',
+        description: 'Override the per-call timeout in milliseconds.',
+      },
     },
     required: ['query'],
   },
@@ -65,16 +79,22 @@ interface ResearchOutput {
 export async function handleResearch(
   args: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const input = args as unknown as ResearchInput;
+  // Input validation + model knob added 2026-05-21.
+  const query = assertString(args, 'query');
+  const depth = assertOptionalEnum(args, 'depth', ['shallow', 'medium', 'deep'] as const);
+  const sources = assertOptionalStringArray(args, 'sources');
+  const maxResults = assertOptionalNumber(args, 'max_results', { min: 1, max: 100 });
+  const model = assertOptionalEnum(args, 'model', ['flash', 'pro', 'auto'] as const);
+  const timeoutMs = assertOptionalNumber(args, 'timeout_ms', { min: 1000 });
 
   const prompt = buildPrompt(
     `Research the following query and provide comprehensive findings:
 
-"${input.query}"
+"${query}"
 
-Depth level: ${input.depth || 'medium'}
-${input.sources ? `Focus on these sources: ${input.sources.join(', ')}` : ''}
-${input.max_results ? `Return up to ${input.max_results} findings` : ''}`,
+Depth level: ${depth || 'medium'}
+${sources ? `Focus on these sources: ${sources.join(', ')}` : ''}
+${maxResults ? `Return up to ${maxResults} findings` : ''}`,
     {},
     `Return a JSON object with this structure:
 {
@@ -93,10 +113,13 @@ ${input.max_results ? `Return up to ${input.max_results} findings` : ''}`,
 }`
   );
 
+  // Per IMPROVEMENT_NOTES (2026-04-27): cold research calls > 2KB prompt
+  // observed timing out at 120s; 240s eliminates that without architecture changes.
   const result = await executeGemini(prompt, {
     tool: 'gemini_research',
     input: args,
-    timeout_ms: input.timeout_ms || 120000,
+    timeout_ms: timeoutMs ?? 240000,
+    model,
   });
 
   if (!result.success) {

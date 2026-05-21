@@ -7,8 +7,14 @@
 
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { executeGemini, buildPrompt, parseGeminiJson } from '../gemini-cli.js';
-import { validateTestOutput } from '../validation.js';
-import type { TestInput } from '../types.js';
+import {
+  validateTestOutput,
+  assertString,
+  assertEnum,
+  assertOptionalEnum,
+  assertOptionalNumber,
+  assertOptionalBoolean,
+} from '../validation.js';
 
 export const testTool: Tool = {
   name: 'gemini_test',
@@ -41,6 +47,15 @@ Returns structured test results with pass/fail details.`,
         type: 'boolean',
         description: 'Generate tests for uncovered code',
         default: false,
+      },
+      model: {
+        type: 'string',
+        enum: ['flash', 'pro', 'auto'],
+        description: "Gemini model tier. 'auto' (default for test) routes to flash.",
+      },
+      timeout_ms: {
+        type: 'number',
+        description: 'Override the per-call timeout in milliseconds.',
       },
     },
     required: ['test_type', 'scope'],
@@ -77,24 +92,33 @@ interface TestOutput {
 }
 
 export async function handleTest(args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const input = args as unknown as TestInput;
+  // Input validation + model knob added 2026-05-21.
+  const testType = assertEnum(args, 'test_type', ['unit', 'integration', 'e2e', 'all'] as const);
+  const scope = assertString(args, 'scope');
+  const coverageThreshold = assertOptionalNumber(args, 'coverage_threshold', {
+    min: 0,
+    max: 100,
+  });
+  const generateMissing = assertOptionalBoolean(args, 'generate_missing') ?? false;
+  const model = assertOptionalEnum(args, 'model', ['flash', 'pro', 'auto'] as const);
+  const timeoutMs = assertOptionalNumber(args, 'timeout_ms', { min: 1000 });
 
   const prompt = buildPrompt(
-    `Analyze and ${input.generate_missing ? 'generate tests for' : 'execute tests in'}: ${input.scope}
+    `Analyze and ${generateMissing ? 'generate tests for' : 'execute tests in'}: ${scope}
 
-Test type: ${input.test_type}
-Coverage threshold: ${input.coverage_threshold || 80}%
-${input.generate_missing ? 'Generate missing tests for uncovered code' : 'Report test execution results'}
+Test type: ${testType}
+Coverage threshold: ${coverageThreshold ?? 80}%
+${generateMissing ? 'Generate missing tests for uncovered code' : 'Report test execution results'}
 
 Analyze the code structure and:
 1. Identify all testable units
-2. ${input.generate_missing ? 'Generate comprehensive tests' : 'Run existing tests'}
+2. ${generateMissing ? 'Generate comprehensive tests' : 'Run existing tests'}
 3. Calculate code coverage
 4. Provide recommendations for improving test quality`,
     {},
     `Return a JSON object with this structure:
 {
-  "test_type": "${input.test_type}",
+  "test_type": "${testType}",
   "scope": "the scope analyzed",
   "total": number,
   "passed": number,
@@ -117,7 +141,7 @@ Analyze the code structure and:
     }
   ],
   ${
-    input.generate_missing
+    generateMissing
       ? `"generated_tests": [
     {
       "path": "path/to/new.test.ts",
@@ -134,8 +158,9 @@ Analyze the code structure and:
   const result = await executeGemini(prompt, {
     tool: 'gemini_test',
     input: args,
-    files: [`@${input.scope}`],
-    timeout_ms: input.timeout_ms || 300000,
+    files: [`@${scope}`],
+    timeout_ms: timeoutMs ?? 300000,
+    model,
   });
 
   if (!result.success) {
@@ -162,9 +187,7 @@ Analyze the code structure and:
   const validation = validateTestOutput(parsed as unknown as Record<string, unknown>);
 
   // Check coverage threshold
-  const meetsCoverage = parsed.coverage
-    ? parsed.coverage >= (input.coverage_threshold || 80)
-    : null;
+  const meetsCoverage = parsed.coverage ? parsed.coverage >= (coverageThreshold ?? 80) : null;
 
   return {
     success: true,

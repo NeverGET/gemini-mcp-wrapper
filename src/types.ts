@@ -3,6 +3,19 @@
  */
 
 /**
+ * Gemini model tier choice exposed to callers.
+ *
+ * - ``flash`` — fast, ~20x cheaper. Default for mechanical / lookup work.
+ * - ``pro``   — deeper reasoning. Default for design / critique / dialogue.
+ * - ``auto``  — per-tool default with prompt-size escalation to pro.
+ *
+ * Resolved to a concrete Gemini CLI model id by ``resolveModel`` in
+ * ``gemini-cli.ts``. Added 2026-05-21 per IMPROVEMENT_NOTES item A
+ * (cost-saving — Flash is ~20x cheaper than Pro on typical workloads).
+ */
+export type ModelChoice = 'flash' | 'pro' | 'auto';
+
+/**
  * Session state for tracking Gemini operations
  */
 export interface GeminiSession {
@@ -43,6 +56,11 @@ export interface ValidationResult {
 export interface BaseToolInput {
   session_id?: string;
   timeout_ms?: number;
+  /**
+   * Model tier choice. Defaults to ``'auto'`` if omitted.
+   * See :type:`ModelChoice` for resolution semantics.
+   */
+  model?: ModelChoice;
 }
 
 /**
@@ -120,7 +138,11 @@ export interface AnalyzeInput extends BaseToolInput {
 
 /**
  * Continue tool input
+ *
+ * Extends BaseToolInput so callers may override the model on resumption,
+ * though in practice ``gemini_continue`` inherits the session's original
+ * tool name and falls back to ``'auto'`` for the model.
  */
-export interface ContinueInput {
+export interface ContinueInput extends BaseToolInput {
   session_id: string;
 }

@@ -8,7 +8,7 @@
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { executeGemini, buildPrompt, parseGeminiJson } from '../gemini-cli.js';
 import { loadSession, incrementContinue, markComplete, markError } from '../session.js';
-import type { ContinueInput } from '../types.js';
+import { assertString, assertOptionalEnum, assertOptionalNumber } from '../validation.js';
 
 export const continueTool: Tool = {
   name: 'gemini_continue',
@@ -26,6 +26,15 @@ Restores session state and continues from where it left off.`,
         type: 'string',
         description: 'Session ID to resume',
       },
+      model: {
+        type: 'string',
+        enum: ['flash', 'pro', 'auto'],
+        description: "Gemini model tier for the resumption call. Defaults to 'auto'.",
+      },
+      timeout_ms: {
+        type: 'number',
+        description: 'Override the per-call timeout in milliseconds.',
+      },
     },
     required: ['session_id'],
   },
@@ -34,15 +43,18 @@ Restores session state and continues from where it left off.`,
 export async function handleContinue(
   args: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const input = args as unknown as ContinueInput;
+  // Input validation + model knob added 2026-05-21.
+  const sessionId = assertString(args, 'session_id');
+  const model = assertOptionalEnum(args, 'model', ['flash', 'pro', 'auto'] as const);
+  const timeoutMs = assertOptionalNumber(args, 'timeout_ms', { min: 1000 });
 
   // Load existing session
-  const session = await loadSession(input.session_id);
+  const session = await loadSession(sessionId);
 
   if (!session) {
     return {
       success: false,
-      error: `Session not found: ${input.session_id}`,
+      error: `Session not found: ${sessionId}`,
     };
   }
 
@@ -101,7 +113,8 @@ Maintain consistency with the previous output format.`,
   const result = await executeGemini(prompt, {
     tool: session.tool,
     input: session.input as Record<string, unknown>,
-    timeout_ms: 300000, // 5 min for continuation
+    timeout_ms: timeoutMs ?? 300000, // 5 min for continuation
+    model,
   });
 
   if (!result.success) {

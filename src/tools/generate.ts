@@ -7,8 +7,17 @@
 
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { executeGemini, buildPrompt, parseGeminiJson } from '../gemini-cli.js';
-import { validateCodeBlocks, validateFileList } from '../validation.js';
-import type { GenerateInput } from '../types.js';
+import {
+  validateCodeBlocks,
+  validateFileList,
+  assertString,
+  assertOptionalString,
+  assertOptionalEnum,
+  assertOptionalNumber,
+  assertObjectArray,
+  assertOptionalRecord,
+  InputError,
+} from '../validation.js';
 
 export const generateTool: Tool = {
   name: 'gemini_generate',
@@ -48,6 +57,15 @@ Claude validates syntax and pattern compliance before accepting.`,
         type: 'string',
         description: 'Coding style guidelines to follow',
       },
+      model: {
+        type: 'string',
+        enum: ['flash', 'pro', 'auto'],
+        description: "Gemini model tier. 'auto' (default for generate) routes to flash.",
+      },
+      timeout_ms: {
+        type: 'number',
+        description: 'Override the per-call timeout in milliseconds.',
+      },
     },
     required: ['spec', 'files'],
   },
@@ -71,21 +89,48 @@ interface GenerateOutput {
 export async function handleGenerate(
   args: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const input = args as unknown as GenerateInput;
+  // Input validation + model knob added 2026-05-21.
+  // Closes Bug B' (`input.files.map()` on line 76 of the pre-fix file)
+  // by validating files is a non-empty object array of {path, description}.
+  const spec = assertString(args, 'spec');
+  const files = assertObjectArray(
+    args,
+    'files',
+    (item, idx) => {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+        throw new InputError(`files[${idx}]`, 'object with {path, description}', item);
+      }
+      const f = item as Record<string, unknown>;
+      const path = f.path;
+      const description = f.description;
+      if (typeof path !== 'string' || path.length === 0) {
+        throw new InputError(`files[${idx}].path`, 'non-empty string', path);
+      }
+      if (typeof description !== 'string' || description.length === 0) {
+        throw new InputError(`files[${idx}].description`, 'non-empty string', description);
+      }
+      return { path, description };
+    },
+    { minLen: 1 }
+  );
+  const templates = assertOptionalRecord(args, 'templates');
+  const styleGuide = assertOptionalString(args, 'style_guide');
+  const model = assertOptionalEnum(args, 'model', ['flash', 'pro', 'auto'] as const);
+  const timeoutMs = assertOptionalNumber(args, 'timeout_ms', { min: 1000 });
 
-  const fileList = input.files.map((f) => `- ${f.path}: ${f.description}`).join('\n');
+  const fileList = files.map((f) => `- ${f.path}: ${f.description}`).join('\n');
 
   const prompt = buildPrompt(
     `Generate the following files based on this specification:
 
 ## Specification
-${input.spec}
+${spec}
 
 ## Files to Generate
 ${fileList}
 
-${input.style_guide ? `## Style Guide\n${input.style_guide}` : ''}
-${input.templates ? `## Templates to Follow\n${JSON.stringify(input.templates, null, 2)}` : ''}
+${styleGuide ? `## Style Guide\n${styleGuide}` : ''}
+${templates ? `## Templates to Follow\n${JSON.stringify(templates, null, 2)}` : ''}
 
 Generate complete, production-ready code for each file.
 Follow best practices and the provided style guide.
@@ -111,7 +156,8 @@ Include proper imports, exports, and documentation.`,
   const result = await executeGemini(prompt, {
     tool: 'gemini_generate',
     input: args,
-    timeout_ms: input.timeout_ms || 300000, // 5 min for generation
+    timeout_ms: timeoutMs ?? 300000, // 5 min for generation
+    model,
   });
 
   if (!result.success) {
@@ -135,7 +181,7 @@ Include proper imports, exports, and documentation.`,
   }
 
   // Validate generated files
-  const requestedPaths = input.files.map((f) => f.path);
+  const requestedPaths = files.map((f) => f.path);
   const fileValidation = validateFileList({ files: parsed.generated_files }, requestedPaths);
 
   // Validate code blocks in each file

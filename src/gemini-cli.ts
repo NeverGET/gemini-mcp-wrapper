@@ -6,7 +6,7 @@
  */
 
 import { spawn } from 'child_process';
-import type { GeminiResult } from './types.js';
+import type { GeminiResult, ModelChoice } from './types.js';
 import { createSession, markComplete, markError, markNeedsContinue } from './session.js';
 
 /**
@@ -19,6 +19,66 @@ const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
  */
 const MAX_OUTPUT_LENGTH = 100000;
 
+// =============================================================================
+// Model resolution (added 2026-05-21 per IMPROVEMENT_NOTES item A)
+// =============================================================================
+
+/**
+ * Concrete Gemini CLI model ids for the ``flash`` / ``pro`` friendly tiers.
+ *
+ * Overridable via environment variables so the user can opt into the newer
+ * Gemini 3 models (listed in the interactive ``/model`` UI as
+ * ``gemini-3.1-pro`` / ``gemini-3-flash``) once headless ``-m`` access is
+ * available on their CLI / auth tier. As of CLI v0.38.2 with oauth-personal
+ * auth (2026-05-21), the headless ``-m`` flag rejects the Gemini 3 ids with
+ * ``ModelNotFoundError`` even though the interactive UI lists them, so the
+ * baked-in defaults are the verified-working 2.5 family.
+ *
+ * To use Gemini 3 once the access situation resolves:
+ *   ``export GEMINI_MCP_PRO_MODEL=gemini-3.1-pro``
+ *   ``export GEMINI_MCP_FLASH_MODEL=gemini-3-flash``
+ */
+export const FLASH_MODEL = process.env.GEMINI_MCP_FLASH_MODEL ?? 'gemini-2.5-flash';
+export const PRO_MODEL = process.env.GEMINI_MCP_PRO_MODEL ?? 'gemini-2.5-pro';
+
+/**
+ * Per-tool ``auto`` defaults — mechanical work routes to flash,
+ * reasoning-heavy work routes to pro. ``resolveModel`` escalates any
+ * tool's base default to pro if the assembled prompt exceeds 5KB
+ * (signal: enough context that depth-of-reasoning materially pays off).
+ */
+const AUTO_TOOL_DEFAULTS: Readonly<Record<string, 'flash' | 'pro'>> = {
+  gemini_research: 'flash',
+  gemini_file_scan: 'flash',
+  gemini_generate: 'flash',
+  gemini_test: 'flash',
+  gemini_document: 'flash',
+  gemini_dialogue: 'pro',
+  gemini_analyze: 'pro',
+  gemini_continue: 'flash',
+};
+
+const AUTO_PROMPT_BYTES_PRO_THRESHOLD = 5_000;
+
+/**
+ * Resolve a friendly model choice + tool context + prompt size to a
+ * concrete Gemini CLI model id (passable to ``-m``).
+ *
+ * Exported for unit testing; also called from ``executeGemini`` below.
+ */
+export function resolveModel(
+  choice: ModelChoice | undefined,
+  toolName: string,
+  promptBytes: number
+): string {
+  if (choice === 'flash') return FLASH_MODEL;
+  if (choice === 'pro') return PRO_MODEL;
+  // 'auto' (or undefined): per-tool default with prompt-size escalation
+  const base = AUTO_TOOL_DEFAULTS[toolName] ?? 'flash';
+  if (promptBytes > AUTO_PROMPT_BYTES_PRO_THRESHOLD) return PRO_MODEL;
+  return base === 'pro' ? PRO_MODEL : FLASH_MODEL;
+}
+
 /**
  * Execute a Gemini CLI command
  */
@@ -30,12 +90,21 @@ export async function executeGemini(
     timeout_ms?: number;
     files?: string[];
     all_files?: boolean;
+    /**
+     * Friendly model choice. Defaults to ``'auto'`` (per-tool heuristic).
+     */
+    model?: ModelChoice;
   }
 ): Promise<GeminiResult> {
-  const { tool, input, timeout_ms = DEFAULT_TIMEOUT_MS, files, all_files } = options;
+  const { tool, input, timeout_ms = DEFAULT_TIMEOUT_MS, files, all_files, model } = options;
 
   // Create session for tracking
   const session = await createSession(tool, input);
+
+  // Resolve the concrete model id. Size measured against the prompt body
+  // alone (file attachments add to CLI context but not to this byte count).
+  const resolvedModel = resolveModel(model, tool, Buffer.byteLength(prompt, 'utf8'));
+  const modelFlags: string[] = ['-m', resolvedModel];
 
   // Build command arguments
   // Note: Gemini CLI doesn't allow mixing positional args (@files) with -p flag
@@ -43,14 +112,14 @@ export async function executeGemini(
   let args: string[];
 
   if (files && files.length > 0) {
-    // Files present: use positional prompt (gemini @file1 @file2 "prompt")
-    args = [...files.map(f => f.startsWith('@') ? f : `@${f}`), prompt];
+    // Files present: use positional prompt (gemini -m <id> @file1 @file2 "prompt")
+    args = [...modelFlags, ...files.map((f) => (f.startsWith('@') ? f : `@${f}`)), prompt];
   } else if (all_files) {
-    // all_files flag: use positional prompt (gemini --all_files "prompt")
-    args = ['--all_files', prompt];
+    // all_files flag: use positional prompt (gemini -m <id> --all_files "prompt")
+    args = [...modelFlags, '--all_files', prompt];
   } else {
-    // No files: use -p flag (gemini -p "prompt")
-    args = ['-p', prompt];
+    // No files: use -p flag (gemini -m <id> -p "prompt")
+    args = [...modelFlags, '-p', prompt];
   }
 
   return new Promise((resolve) => {

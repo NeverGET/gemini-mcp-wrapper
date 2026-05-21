@@ -7,8 +7,15 @@
 
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { executeGemini, buildPrompt, parseGeminiJson } from '../gemini-cli.js';
-import { validateDocumentOutput } from '../validation.js';
-import type { DocumentInput } from '../types.js';
+import {
+  validateDocumentOutput,
+  assertString,
+  assertEnum,
+  assertOptionalStringArray,
+  assertOptionalBoolean,
+  assertOptionalEnum,
+  assertOptionalNumber,
+} from '../validation.js';
 
 export const documentTool: Tool = {
   name: 'gemini_document',
@@ -42,6 +49,15 @@ Returns structured documentation with completeness validation.`,
         description: 'Include usage examples',
         default: true,
       },
+      model: {
+        type: 'string',
+        enum: ['flash', 'pro', 'auto'],
+        description: "Gemini model tier. 'auto' (default for document) routes to flash.",
+      },
+      timeout_ms: {
+        type: 'number',
+        description: 'Override the per-call timeout in milliseconds.',
+      },
     },
     required: ['scope', 'format'],
   },
@@ -70,15 +86,21 @@ interface DocumentOutput {
 export async function handleDocument(
   args: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const input = args as unknown as DocumentInput;
+  // Input validation + model knob added 2026-05-21.
+  const scope = assertString(args, 'scope');
+  const format = assertEnum(args, 'format', ['markdown', 'jsdoc', 'readme', 'api'] as const);
+  const sections = assertOptionalStringArray(args, 'sections');
+  const includeExamples = assertOptionalBoolean(args, 'include_examples') ?? true;
+  const model = assertOptionalEnum(args, 'model', ['flash', 'pro', 'auto'] as const);
+  const timeoutMs = assertOptionalNumber(args, 'timeout_ms', { min: 1000 });
 
-  const sectionsRequested = input.sections?.join(', ') || 'all relevant sections';
+  const sectionsRequested = sections?.join(', ') || 'all relevant sections';
 
   const prompt = buildPrompt(
-    `Generate comprehensive ${input.format} documentation for: ${input.scope}
+    `Generate comprehensive ${format} documentation for: ${scope}
 
 Include these sections: ${sectionsRequested}
-${input.include_examples ? 'Include practical usage examples' : 'Focus on reference documentation only'}
+${includeExamples ? 'Include practical usage examples' : 'Focus on reference documentation only'}
 
 Analyze the code thoroughly and create documentation that:
 1. Explains the purpose and architecture
@@ -90,8 +112,8 @@ Analyze the code thoroughly and create documentation that:
     `Return a JSON object with this structure:
 {
   "scope": "what was documented",
-  "format": "${input.format}",
-  "content": "the full documentation content in ${input.format} format",
+  "format": "${format}",
+  "content": "the full documentation content in ${format} format",
   "sections": [
     {
       "title": "section title",
@@ -103,7 +125,7 @@ Analyze the code thoroughly and create documentation that:
     "sections_missing": ["sections that couldn't be documented"],
     "score": 0-100
   }${
-    input.include_examples
+    includeExamples
       ? `,
   "examples": [
     {
@@ -120,8 +142,9 @@ Analyze the code thoroughly and create documentation that:
   const result = await executeGemini(prompt, {
     tool: 'gemini_document',
     input: args,
-    files: [`@${input.scope}`],
-    timeout_ms: input.timeout_ms || 180000,
+    files: [`@${scope}`],
+    timeout_ms: timeoutMs ?? 180000,
+    model,
   });
 
   if (!result.success) {
@@ -145,7 +168,7 @@ Analyze the code thoroughly and create documentation that:
   }
 
   // Validate documentation completeness
-  const requiredSections = input.sections || ['Overview', 'Usage', 'API'];
+  const requiredSections = sections || ['Overview', 'Usage', 'API'];
   const validation = validateDocumentOutput(
     parsed as unknown as Record<string, unknown>,
     requiredSections

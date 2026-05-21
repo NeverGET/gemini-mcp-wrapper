@@ -7,8 +7,12 @@
 
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { executeGemini, buildPrompt, parseGeminiJson } from '../gemini-cli.js';
-import { validateAnalysisOutput } from '../validation.js';
-import type { AnalyzeInput } from '../types.js';
+import {
+  validateAnalysisOutput,
+  assertString,
+  assertOptionalNumber,
+  assertOptionalEnum,
+} from '../validation.js';
 
 export const analyzeTool: Tool = {
   name: 'gemini_analyze',
@@ -39,6 +43,15 @@ Returns structured analysis with actionable recommendations.`,
         enum: ['architecture', 'patterns', 'dependencies', 'security', 'performance', 'all'],
         description: 'Analysis focus area',
         default: 'all',
+      },
+      model: {
+        type: 'string',
+        enum: ['flash', 'pro', 'auto'],
+        description: "Gemini model tier. 'auto' (default for analyze) routes to pro.",
+      },
+      timeout_ms: {
+        type: 'number',
+        description: 'Override the per-call timeout in milliseconds.',
       },
     },
     required: ['path'],
@@ -83,7 +96,19 @@ interface AnalysisOutput {
 export async function handleAnalyze(
   args: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const input = args as unknown as AnalyzeInput;
+  // Input validation + model knob added 2026-05-21.
+  const path = assertString(args, 'path');
+  const depth = assertOptionalEnum(args, 'depth', ['shallow', 'medium', 'deep'] as const);
+  const focus = assertOptionalEnum(args, 'focus', [
+    'architecture',
+    'patterns',
+    'dependencies',
+    'security',
+    'performance',
+    'all',
+  ] as const);
+  const model = assertOptionalEnum(args, 'model', ['flash', 'pro', 'auto'] as const);
+  const timeoutMs = assertOptionalNumber(args, 'timeout_ms', { min: 1000 });
 
   const focusInstructions = {
     architecture: 'Focus on architectural patterns, layers, and component relationships',
@@ -95,9 +120,9 @@ export async function handleAnalyze(
   };
 
   const prompt = buildPrompt(
-    `Perform ${input.depth || 'medium'} analysis of: ${input.path}
+    `Perform ${depth || 'medium'} analysis of: ${path}
 
-${focusInstructions[input.focus || 'all']}
+${focusInstructions[focus || 'all']}
 
 Analyze:
 1. Overall architecture and structure
@@ -111,8 +136,8 @@ Be specific with file locations and code references.`,
     `Return a JSON object with this structure:
 {
   "path": "analyzed path",
-  "depth": "${input.depth || 'medium'}",
-  "focus": "${input.focus || 'all'}",
+  "depth": "${depth || 'medium'}",
+  "focus": "${focus || 'all'}",
   "summary": "executive summary of the analysis",
   "architecture": {
     "layers": ["identified architectural layers"],
@@ -154,8 +179,9 @@ Be specific with file locations and code references.`,
   const result = await executeGemini(prompt, {
     tool: 'gemini_analyze',
     input: args,
-    files: [`@${input.path}/`],
-    timeout_ms: input.timeout_ms || 300000,
+    files: [`@${path}/`],
+    timeout_ms: timeoutMs ?? 300000,
+    model,
   });
 
   if (!result.success) {

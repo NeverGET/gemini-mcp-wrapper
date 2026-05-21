@@ -7,8 +7,14 @@
 
 import { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { executeGemini, buildPrompt, parseGeminiJson } from '../gemini-cli.js';
-import { validateFileList } from '../validation.js';
-import type { FileScanInput } from '../types.js';
+import {
+  validateFileList,
+  assertString,
+  assertOptionalString,
+  assertOptionalNumber,
+  assertOptionalBoolean,
+  assertOptionalEnum,
+} from '../validation.js';
 
 export const fileScanTool: Tool = {
   name: 'gemini_file_scan',
@@ -46,6 +52,15 @@ Returns file summaries and structure analysis.`,
         description: 'Scan subdirectories recursively',
         default: true,
       },
+      model: {
+        type: 'string',
+        enum: ['flash', 'pro', 'auto'],
+        description: "Gemini model tier. 'auto' (default for file_scan) routes to flash.",
+      },
+      timeout_ms: {
+        type: 'number',
+        description: 'Override the per-call timeout in milliseconds.',
+      },
     },
     required: ['path'],
   },
@@ -72,16 +87,23 @@ interface FileScanOutput {
 export async function handleFileScan(
   args: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const input = args as unknown as FileScanInput;
+  // Input validation + model knob added 2026-05-21.
+  const path = assertString(args, 'path');
+  const pattern = assertOptionalString(args, 'pattern');
+  const maxFiles = assertOptionalNumber(args, 'max_files', { min: 1, max: 10_000 });
+  const includeContent = assertOptionalBoolean(args, 'include_content') ?? true;
+  const recursive = assertOptionalBoolean(args, 'recursive') ?? true;
+  const model = assertOptionalEnum(args, 'model', ['flash', 'pro', 'auto'] as const);
+  const timeoutMs = assertOptionalNumber(args, 'timeout_ms', { min: 1000 });
 
-  const filePaths = input.recursive ? [`@${input.path}/`] : [`@${input.path}`];
+  const filePaths = recursive ? [`@${path}/`] : [`@${path}`];
 
   const prompt = buildPrompt(
-    `Scan and analyze the directory structure at: ${input.path}
+    `Scan and analyze the directory structure at: ${path}
 
-${input.pattern ? `Focus on files matching: ${input.pattern}` : ''}
-${input.max_files ? `Analyze up to ${input.max_files} files` : ''}
-${input.include_content ? 'Include content summaries for each file' : 'Only list file metadata'}
+${pattern ? `Focus on files matching: ${pattern}` : ''}
+${maxFiles ? `Analyze up to ${maxFiles} files` : ''}
+${includeContent ? 'Include content summaries for each file' : 'Only list file metadata'}
 
 Provide a comprehensive analysis of:
 1. All files found
@@ -116,7 +138,8 @@ Provide a comprehensive analysis of:
     tool: 'gemini_file_scan',
     input: args,
     files: filePaths,
-    timeout_ms: input.timeout_ms || 180000,
+    timeout_ms: timeoutMs ?? 180000,
+    model,
   });
 
   if (!result.success) {
@@ -140,7 +163,7 @@ Provide a comprehensive analysis of:
   }
 
   // Validate file list
-  const validation = validateFileList(parsed as unknown as Record<string, unknown>, [input.path]);
+  const validation = validateFileList(parsed as unknown as Record<string, unknown>, [path]);
 
   return {
     success: true,
