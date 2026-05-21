@@ -26,20 +26,21 @@ const MAX_OUTPUT_LENGTH = 100000;
 /**
  * Concrete Gemini CLI model ids for the ``flash`` / ``pro`` friendly tiers.
  *
- * Overridable via environment variables so the user can opt into the newer
- * Gemini 3 models (listed in the interactive ``/model`` UI as
- * ``gemini-3.1-pro`` / ``gemini-3-flash``) once headless ``-m`` access is
- * available on their CLI / auth tier. As of CLI v0.38.2 with oauth-personal
- * auth (2026-05-21), the headless ``-m`` flag rejects the Gemini 3 ids with
- * ``ModelNotFoundError`` even though the interactive UI lists them, so the
- * baked-in defaults are the verified-working 2.5 family.
+ * Verified live 2026-05-21 against CLI v0.38.2 — the ``-preview`` suffix
+ * is load-bearing for the Gemini 3 family on the headless ``-m`` flag.
+ * The interactive ``/model`` UI lists them as ``gemini-3.1-pro-preview``
+ * / ``gemini-3-flash-preview`` and the ``-m`` flag accepts these forms;
+ * the bare ``gemini-3.1-pro`` / ``gemini-3-flash`` ids (without
+ * ``-preview``) return ``ModelNotFoundError``.
  *
- * To use Gemini 3 once the access situation resolves:
- *   ``export GEMINI_MCP_PRO_MODEL=gemini-3.1-pro``
- *   ``export GEMINI_MCP_FLASH_MODEL=gemini-3-flash``
+ * Overridable via env vars to fall back to Gemini 2.5 (``gemini-2.5-pro``
+ * / ``gemini-2.5-flash``) or roll forward to a future GA id without a
+ * code change:
+ *   ``export GEMINI_MCP_PRO_MODEL=gemini-2.5-pro``
+ *   ``export GEMINI_MCP_FLASH_MODEL=gemini-2.5-flash``
  */
-export const FLASH_MODEL = process.env.GEMINI_MCP_FLASH_MODEL ?? 'gemini-2.5-flash';
-export const PRO_MODEL = process.env.GEMINI_MCP_PRO_MODEL ?? 'gemini-2.5-pro';
+export const FLASH_MODEL = process.env.GEMINI_MCP_FLASH_MODEL ?? 'gemini-3-flash-preview';
+export const PRO_MODEL = process.env.GEMINI_MCP_PRO_MODEL ?? 'gemini-3.1-pro-preview';
 
 /**
  * Per-tool ``auto`` defaults — mechanical work routes to flash,
